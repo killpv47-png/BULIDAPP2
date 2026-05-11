@@ -1,0 +1,88 @@
+name: Build APK (Split) & Telegram
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. دریافت کدها
+        uses: actions/checkout@v4
+
+      - name: 2. نصب Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: 3. راه‌اندازی پروژه (فقط پوشه android رو می‌سازیم و اضافات رو پاک می‌کنیم)
+        run: |
+          flutter create --platforms android .
+          rm -rf android/app/src/main/kotlin/com/example
+
+      - name: 4. دریافت کتابخانه‌ها
+        run: flutter pub get
+
+      - name: 5. ساخت فایل‌های APK
+        run: flutter build apk --split-per-abi
+
+      - name: 6. ارسال APKها به تلگرام
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          BASE_DIR="build/app/outputs/flutter-apk"
+          for apk in "$BASE_DIR"/app-*-release.apk; do
+            echo "📤 ارسال فایل $(basename "$apk") ..."
+            curl -s -F "document=@${apk}" \
+                 -F "chat_id=${CHAT_ID}" \
+                 "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument"
+            sleep 2
+          done
+          echo "✅ تمام فایل‌ها ارسال شدند."
+
+      - name: 7. ده دقیقه بیداری برای دریافت دوباره
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python3 - << ENDPYTHON
+          import requests, time, os, glob
+
+          BOT_TOKEN = os.environ['BOT_TOKEN']
+          BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+          APK_FILES = glob.glob("build/app/outputs/flutter-apk/app-*-release.apk")
+          
+          def send_all_apks(chat_id):
+              for apk_path in APK_FILES:
+                  with open(apk_path, 'rb') as f:
+                      requests.post(f"{BASE_URL}/sendDocument",
+                                    data={'chat_id': chat_id},
+                                    files={'document': f})
+                  time.sleep(1)
+
+          END_TIME = time.time() + 600
+          last_update_id = -1
+
+          print("⏰ ربات برای ۱۰ دقیقه بیدار ماند و به /start پاسخ می‌دهد...")
+          while time.time() < END_TIME:
+              url = f"{BASE_URL}/getUpdates?timeout=5&offset={last_update_id + 1}"
+              try:
+                  updates = requests.get(url).json()
+              except Exception as e:
+                  print("⚠️ خطا در دریافت به‌روزرسانی:", e)
+                  time.sleep(2)
+                  continue
+
+              if updates.get('result'):
+                  for upd in updates['result']:
+                      last_update_id = upd['update_id']
+                      msg = upd.get('message')
+                      if msg and msg.get('text') == '/start':
+                          chat_id = str(msg['chat']['id'])
+                          print(f"🔔 دریافت /start از {chat_id}")
+                          send_all_apks(chat_id)
+
+              time.sleep(3)
+
+          print("😴 ۱۰ دقیقه تمام شد. ربات به خواب رفت.")
+          ENDPYTHON
