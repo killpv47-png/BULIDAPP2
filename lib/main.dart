@@ -1,342 +1,126 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:async';
-import 'proxy_server.dart';
-import 'log_manager.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 void main() => runApp(const GateApp());
 
 class GateApp extends StatelessWidget {
   const GateApp({super.key});
-
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF90CAF9),
-          brightness: Brightness.light,
-        ),
-        scaffoldBackgroundColor: const Color(0xFFE3F2FD),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF90CAF9),
-          foregroundColor: Colors.white,
-          elevation: 0,
-        ),
-        cardTheme: CardThemeData(
-          elevation: 2,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-      ),
-      home: const HomePage(),
-    );
-  }
+  Widget build(BuildContext context) => MaterialApp(
+    debugShowCheckedModeBanner: false,
+    theme: ThemeData(
+      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF90CAF9)),
+      scaffoldBackgroundColor: const Color(0xFFE3F2FD),
+      appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF90CAF9), foregroundColor: Colors.white),
+    ),
+    home: const BrowserPage(),
+  );
 }
 
-class HomePage extends StatefulWidget {
-  const HomePage({super.key});
-
+class BrowserPage extends StatefulWidget {
+  const BrowserPage({super.key});
   @override
-  State<HomePage> createState() => _HomePageState();
+  State<BrowserPage> createState() => _BrowserPageState();
 }
 
-class _HomePageState extends State<HomePage> {
-  final _deployIdController = TextEditingController();
+class _BrowserPageState extends State<BrowserPage> {
+  final _urlController = TextEditingController();
+  final _deployController = TextEditingController();
   final _keyController = TextEditingController();
-  
-  bool _vpnActive = false;
-  bool _loading = false;
-  
-  GateProxy? _proxy;
-  static const _vpnChannel = MethodChannel('com.gate.app/vpn');
-  
-  double _downloadSpeed = 0.0;
-  double _uploadSpeed = 0.0;
-  Timer? _speedTimer;
-  
-  List<LogEntry> _logs = [];
+  WebViewController? _webController;
+  bool _googleMode = true;
 
   @override
   void initState() {
     super.initState();
-    _loadConfig();
+    _loadSettings();
+    _webController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..loadRequest(Uri.parse('about:blank'));
   }
 
-  Future<void> _loadConfig() async {
+  Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    _deployIdController.text = prefs.getString('deploy_id') ?? '';
+    _deployController.text = prefs.getString('deploy_id') ?? '';
     _keyController.text = prefs.getString('auth_key') ?? '';
   }
 
-  Future<void> _saveConfig() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('deploy_id', _deployIdController.text);
-    await prefs.setString('auth_key', _keyController.text);
-  }
+  Future<void> _navigate(String url) async {
+    if (url.isEmpty) return;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://$url';
 
-  Future<void> _startVpn() async {
-    if (_deployIdController.text.isEmpty || _keyController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Deployment ID و Key را وارد کنید')),
-      );
-      return;
-    }
-
-    setState(() => _loading = true);
-
-    try {
-      _proxy = GateProxy(_deployIdController.text, _keyController.text);
-      await _proxy!.start();
-      
-      final bool result = await _vpnChannel.invokeMethod('startVpn', {
-        'proxyPort': _proxy!.port,
-      });
-      
-      if (result) {
-        setState(() {
-          _vpnActive = true;
-          _loading = false;
-        });
-        _speedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-          setState(() {
-            _downloadSpeed = _proxy?.downloadMonitor.currentSpeed ?? 0;
-            _uploadSpeed = _proxy?.uploadMonitor.currentSpeed ?? 0;
-            _logs = _proxy?.logManager.logs ?? [];
-          });
-        });
-        _saveConfig();
-      } else {
-        throw Exception('VPN service failed to start');
+    if (_googleMode) {
+      final scriptId = _deployController.text.trim();
+      final key = _keyController.text.trim();
+      if (scriptId.isEmpty || key.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Deployment ID و Key را وارد کنید')));
+        return;
       }
-    } catch (e) {
-      setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('خطا در راه‌اندازی VPN: $e')),
-      );
+      try {
+        final response = await http.post(
+          Uri.parse('https://script.google.com/macros/s/$scriptId/exec'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'key': key, 'url': url, 'method': 'GET'}),
+        );
+        if (response.statusCode == 200) {
+          _webController?.loadHtmlString(response.body);
+        } else {
+          throw Exception('Error ${response.statusCode}');
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطا: $e')));
+      }
+    } else {
+      _webController?.loadRequest(Uri.parse(url));
     }
   }
 
-  Future<void> _stopVpn() async {
-    _speedTimer?.cancel();
-    await _vpnChannel.invokeMethod('stopVpn');
-    _proxy?.stop();
-    setState(() {
-      _vpnActive = false;
-      _downloadSpeed = 0;
-      _uploadSpeed = 0;
-      _logs = [];
-    });
-  }
-
   @override
-  void dispose() {
-    _speedTimer?.cancel();
-    _proxy?.stop();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            Container(
-              width: 32, height: 32,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: Colors.white),
-              ),
-              child: CustomPaint(painter: KavianiPainter()),
-            ),
-            const SizedBox(width: 8),
-            const Text('Gate VPN', style: TextStyle(fontWeight: FontWeight.bold)),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: _showSettings,
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  children: [
-                    Icon(
-                      _vpnActive ? Icons.lock_open : Icons.lock,
-                      size: 48,
-                      color: _vpnActive ? Colors.green : Colors.red,
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      _vpnActive ? 'VPN فعال' : 'VPN غیرفعال',
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 20),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _loading ? null : (_vpnActive ? _stopVpn : _startVpn),
-                        icon: Icon(_vpnActive ? Icons.power_settings_new : Icons.play_arrow),
-                        label: Text(_loading ? 'در حال اتصال...' : (_vpnActive ? 'قطع اتصال' : 'اتصال')),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _vpnActive ? Colors.red : Colors.green,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: [
-                          const Icon(Icons.download, color: Colors.blue),
-                          const Text('دانلود'),
-                          const SizedBox(height: 4),
-                          Text(
-                            _formatSpeed(_downloadSpeed),
-                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: [
-                          const Icon(Icons.upload, color: Colors.orange),
-                          const Text('آپلود'),
-                          const SizedBox(height: 4),
-                          Text(
-                            _formatSpeed(_uploadSpeed),
-                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('لاگ فعالیت‌ها', style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      height: 150,
-                      child: ListView.builder(
-                        itemCount: _logs.length,
-                        itemBuilder: (_, index) {
-                          final entry = _logs[index];
-                          return Text(
-                            '${entry.timestamp.toString().substring(11, 19)} - ${entry.message}',
-                            style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _formatSpeed(double bytesPerSec) {
-    if (bytesPerSec < 1024) return '${bytesPerSec.toStringAsFixed(0)} B/s';
-    if (bytesPerSec < 1048576) return '${(bytesPerSec / 1024).toStringAsFixed(1)} KB/s';
-    return '${(bytesPerSec / 1048576).toStringAsFixed(2)} MB/s';
-  }
-
-  void _showSettings() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('تنظیمات اتصال'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: _deployIdController,
-                decoration: const InputDecoration(
-                  labelText: 'Deployment ID',
-                  hintText: 'AKfycbw...',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _keyController,
-                decoration: const InputDecoration(
-                  labelText: 'Auth Key',
-                  hintText: 'کلید امنیتی اسکریپت',
-                  border: OutlineInputBorder(),
-                ),
-                obscureText: true,
-              ),
-            ],
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Gate Browser'),
+      actions: [
+        Switch(value: _googleMode, onChanged: (v) => setState(() => _googleMode = v)),
+        IconButton(icon: const Icon(Icons.settings), onPressed: _showSettings),
+      ],
+    ),
+    body: Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: TextField(
+            controller: _urlController,
+            decoration: const InputDecoration(hintText: 'آدرس', border: OutlineInputBorder()),
+            onSubmitted: _navigate,
           ),
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('انصراف')),
-          TextButton(
-            onPressed: () {
-              _saveConfig();
-              Navigator.pop(ctx);
-            },
-            child: const Text('ذخیره'),
-          ),
-        ],
-      ),
-    );
-  }
-}
+        Expanded(child: WebViewWidget(controller: _webController!)),
+      ],
+    ),
+  );
 
-class KavianiPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final bg = Paint()..color = const Color(0xFFC62828);
-    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), bg);
-    final gold = Paint()..color = Colors.amber.shade700;
-    canvas.drawRect(Rect.fromLTWH(size.width * 0.4, 0, size.width * 0.2, size.height), gold);
-    final sun = Paint()..color = Colors.yellow;
-    canvas.drawCircle(Offset(size.width * 0.5, size.height * 0.5), size.width * 0.15, sun);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  void _showSettings() => showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('تنظیمات'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: _deployController, decoration: const InputDecoration(labelText: 'Deployment ID')),
+        TextField(controller: _keyController, decoration: const InputDecoration(labelText: 'Auth Key'), obscureText: true),
+      ]),
+      actions: [
+        TextButton(
+          onPressed: () async {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('deploy_id', _deployController.text);
+            await prefs.setString('auth_key', _keyController.text);
+            Navigator.pop(context);
+          },
+          child: const Text('ذخیره'),
+        ),
+      ],
+    ),
+  );
 }
