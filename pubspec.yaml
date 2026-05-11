@@ -1,5 +1,5 @@
-name: gate_app
-description: Gate VPN
+name: gate_browser
+description: Gate Browser
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,10 +9,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  path_provider: ^2.1.2
-  connectivity_plus: ^6.0.3
-  shared_preferences: ^2.2.2
+  webview_flutter: ^4.4.2
   http: ^1.2.1
+  shared_preferences: ^2.2.2
 
 dev_dependencies:
   flutter_test:
